@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+pandas
+polars
+sentence-transformers
+pinecone
+pymongo
+python-dotenv
