@@ -6,8 +6,11 @@ from pinecone import Pinecone, ServerlessSpec
 from tqdm import tqdm
 from bson import ObjectId
 import time 
+from dotenv import load_dotenv
 
-# Load environment variables
+load_dotenv()
+
+# Load environment variabledo
 MONGO_URI = os.getenv('MONGO_URI')
 PINECONE_API_KEY = os.getenv('PINECONE_API_KEY')
 INDEX_NAME = 'job-posting-embeddings2'
