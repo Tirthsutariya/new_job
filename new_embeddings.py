@@ -140,7 +140,6 @@ def create_new_embeddings(batch_size=32):
 
 
 if __name__ == "__main__":
-    while True:
-        create_new_embeddings()
-        print("Sleeping for 1 hour...")
-        time.sleep(3600)  # Sleep for 1 hour
+    create_new_embeddings()
+    print("Job completed. Render will restart the worker based on schedule.")
+gir
