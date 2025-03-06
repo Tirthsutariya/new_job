@@ -5,12 +5,16 @@ import torch
 from pinecone import Pinecone, ServerlessSpec
 from tqdm import tqdm
 from bson import ObjectId
-import time 
 from dotenv import load_dotenv
+from fastapi import FastAPI, BackgroundTasks
+import uvicorn
 
 load_dotenv()
 
-# Load environment variabledo
+# FastAPI App
+app = FastAPI()
+
+# Load environment variables
 MONGO_URI = os.getenv('MONGO_URI')
 PINECONE_API_KEY = os.getenv('PINECONE_API_KEY')
 INDEX_NAME = 'job-posting-embeddings2'
@@ -139,6 +143,12 @@ def create_new_embeddings(batch_size=32):
     print("Embedding creation complete. Jobs marked as processed in MongoDB.")
 
 
+# FastAPI Endpoint to Trigger Embedding
+@app.get("/run-embedding")
+def run_embedding_task(background_tasks: BackgroundTasks):
+    background_tasks.add_task(create_new_embeddings)
+    return {"message": "Embedding process started in the background!"}
+
+
 if __name__ == "__main__":
-    create_new_embeddings()
-    print("Job completed. Render will restart the worker based on schedule.")
+    uvicorn.run(app, host="0.0.0.0", port=8000)
