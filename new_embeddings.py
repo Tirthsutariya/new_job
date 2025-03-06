@@ -142,4 +142,3 @@ def create_new_embeddings(batch_size=32):
 if __name__ == "__main__":
     create_new_embeddings()
     print("Job completed. Render will restart the worker based on schedule.")
-gir
