@@ -3,6 +3,6 @@ uvicorn
 pymongo
 sentence-transformers
 torch
-pinecone-client
+pinecone
 tqdm
 python-dotenv
