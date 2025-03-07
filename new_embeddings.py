@@ -19,7 +19,7 @@ app = FastAPI()
 MONGO_URI = os.getenv('MONGO_URI')
 PINECONE_API_KEY = os.getenv('PINECONE_API_KEY')
 INDEX_NAME = 'job-posting-embeddings2'
-RENDER_API_URL = "https://your-render-service-url.com/start-watching"  # Replace with your Render service URL
+RENDER_API_URL = os.getenv('RENDER_API_URL') # Replace with your Render service URL
 
 # Load the SentenceTransformer model
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
