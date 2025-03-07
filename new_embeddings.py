@@ -1,4 +1,6 @@
 import os
+import requests
+import time
 from pymongo import MongoClient
 from sentence_transformers import SentenceTransformer
 import torch
@@ -17,6 +19,7 @@ app = FastAPI()
 MONGO_URI = os.getenv('MONGO_URI')
 PINECONE_API_KEY = os.getenv('PINECONE_API_KEY')
 INDEX_NAME = 'job-posting-embeddings2'
+RENDER_API_URL = "https://your-render-service-url.com/start-watching"  # Replace with your Render service URL
 
 # Load the SentenceTransformer model
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -45,17 +48,15 @@ index = pc.Index(INDEX_NAME)
 
 
 def create_embedding_for_new_job(job):
-    """Generate and store embedding for a single job posting and debug the process."""
+    """Generate and store embedding for a single job posting."""
     job_id = str(job['_id'])
     job_text = f"{job.get('job_title', '')} {' '.join(job.get('skills', []))} {job.get('description', '')} {job.get('location', '')}"
     
-    print(f"Processing job: {job_id}")  # Debugging print
+    print(f"Processing job: {job_id}")  
     
     # Encode text
     with torch.no_grad():
         embedding = model.encode([job_text], batch_size=1, convert_to_tensor=True).cpu().numpy().tolist()[0]
-
-    print(f"Generated embedding for job: {job_id}")  # Debugging print
 
     # Store in Pinecone
     metadata = {
@@ -66,15 +67,12 @@ def create_embedding_for_new_job(job):
         "location": job.get('location', '')
     }
     
-    try:
-        index.upsert([(job_id, embedding, metadata)])
-        print(f"Successfully stored embedding in Pinecone for job: {job_id}")  # Debugging print
-    except Exception as e:
-        print(f"Error inserting into Pinecone for job {job_id}: {e}")  # Debugging print
+    index.upsert([(job_id, embedding, metadata)])
+    print(f"Stored embedding in Pinecone for job: {job_id}")  
 
     # Mark as processed in MongoDB
     job_collection.update_one({"_id": ObjectId(job_id)}, {"$set": {"processed": True}})
-    print(f"Marked job {job_id} as processed in MongoDB")  # Debugging print
+    print(f"Marked job {job_id} as processed in MongoDB")  
 
 
 def watch_new_jobs():
@@ -84,36 +82,28 @@ def watch_new_jobs():
         for change in stream:
             if change["operationType"] == "insert":
                 new_job = change["fullDocument"]
-                print(f"New job detected: {new_job['_id']}")  # Debugging print
+                print(f"New job detected: {new_job['_id']}")  
                 if not new_job.get("processed", False):
                     create_embedding_for_new_job(new_job)
 
 
+def keep_alive():
+    """Ping the API every 20 minutes to keep Render service alive."""
+    while True:
+        try:
+            response = requests.get(RENDER_API_URL)
+            print(f"Pinged API: {response.status_code}")
+        except Exception as e:
+            print(f"Error pinging API: {e}")
+        time.sleep(1200)  # 20 minutes = 1200 seconds
+
+
 @app.get("/start-watching")
 def start_watching(background_tasks: BackgroundTasks):
-    """Start background process to watch for new jobs."""
+    """Start background process to watch for new jobs and keep the service alive."""
     background_tasks.add_task(watch_new_jobs)
+    background_tasks.add_task(keep_alive)
     return {"message": "Started watching for new jobs in MongoDB!"}
-
-
-@app.post("/process-new-jobs")
-def process_new_jobs():
-    """Find unprocessed jobs and store embeddings in Pinecone."""
-    unprocessed_jobs = job_collection.find({"processed": False})
-    count = 0
-
-    for job in unprocessed_jobs:
-        create_embedding_for_new_job(job)
-        count += 1
-
-    return {"message": f"{count} new jobs processed and stored in Pinecone."}
-
-
-@app.get("/debug-unprocessed-jobs")
-def debug_unprocessed_jobs():
-    """Check unprocessed jobs in MongoDB for debugging."""
-    unprocessed_jobs = list(job_collection.find({"processed": False}))
-    return {"unprocessed_jobs": [str(job["_id"]) for job in unprocessed_jobs]}
 
 
 if __name__ == "__main__":
