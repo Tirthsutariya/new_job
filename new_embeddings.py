@@ -19,7 +19,7 @@ app = FastAPI()
 MONGO_URI = os.getenv('MONGO_URI')
 PINECONE_API_KEY = os.getenv('PINECONE_API_KEY')
 INDEX_NAME = 'job-posting-embeddings2'
-RENDER_API_URL = os.getenv('RENDER_API_URL') # Replace with your Render service URL
+RENDER_API_URL = os.getenv('RENDER_API_URL')  # Replace with your Render service URL
 
 # Load the SentenceTransformer model
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -33,7 +33,7 @@ job_collection = db['jobposts']
 # Initialize Pinecone
 pc = Pinecone(api_key=PINECONE_API_KEY)
 
-# Check if the index exists; if not, create it
+# Ensure index exists
 if INDEX_NAME not in pc.list_indexes().names():
     print(f"Creating Pinecone index: {INDEX_NAME}")
     pc.create_index(
@@ -42,9 +42,6 @@ if INDEX_NAME not in pc.list_indexes().names():
         metric='cosine',
         spec=ServerlessSpec(cloud='aws', region='us-east-1'),
     )
-
-# Connect to the index
-index = pc.Index(INDEX_NAME)
 
 
 def create_embedding_for_new_job(job):
@@ -59,6 +56,7 @@ def create_embedding_for_new_job(job):
         embedding = model.encode([job_text], batch_size=1, convert_to_tensor=True).cpu().numpy().tolist()[0]
 
     # Store in Pinecone
+    index = pc.Index(INDEX_NAME)  # Ensure fresh connection
     metadata = {
         "job_id": job_id,
         "title": job.get('job_title', ''),
@@ -78,13 +76,19 @@ def create_embedding_for_new_job(job):
 def watch_new_jobs():
     """Continuously watch MongoDB for new job postings."""
     print("Watching for new job postings...")
-    with job_collection.watch() as stream:
-        for change in stream:
-            if change["operationType"] == "insert":
-                new_job = change["fullDocument"]
-                print(f"New job detected: {new_job['_id']}")  
-                if not new_job.get("processed", False):
-                    create_embedding_for_new_job(new_job)
+
+    while True:  # Keep running even if an error occurs
+        try:
+            with job_collection.watch() as stream:
+                for change in stream:
+                    if change["operationType"] == "insert":
+                        new_job = change["fullDocument"]
+                        print(f"New job detected: {new_job['_id']}")  
+                        if not new_job.get("processed", False):
+                            create_embedding_for_new_job(new_job)
+        except Exception as e:
+            print(f"Error watching MongoDB: {e}")
+            time.sleep(5)  # Wait before retrying
 
 
 def keep_alive():
