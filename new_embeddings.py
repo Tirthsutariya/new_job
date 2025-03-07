@@ -99,7 +99,7 @@ def keep_alive():
             print(f"Pinged API: {response.status_code}")
         except Exception as e:
             print(f"Error pinging API: {e}")
-        time.sleep(1200)  # 20 minutes = 1200 seconds
+        time.sleep(600)  # 20 minutes = 1200 seconds
 
 
 @app.get("/start-watching")
