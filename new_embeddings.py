@@ -1,25 +1,15 @@
 import os
-import requests
-import time
 from pymongo import MongoClient
 from sentence_transformers import SentenceTransformer
 import torch
 from pinecone import Pinecone, ServerlessSpec
+from tqdm import tqdm
 from bson import ObjectId
-from dotenv import load_dotenv
-from fastapi import FastAPI, BackgroundTasks
-import uvicorn
-
-load_dotenv()
-
-# FastAPI App
-app = FastAPI()
 
 # Load environment variables
 MONGO_URI = os.getenv('MONGO_URI')
 PINECONE_API_KEY = os.getenv('PINECONE_API_KEY')
 INDEX_NAME = 'job-posting-embeddings2'
-RENDER_API_URL = os.getenv('RENDER_API_URL')  # Replace with your Render service URL
 
 # Load the SentenceTransformer model
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -33,7 +23,7 @@ job_collection = db['jobposts']
 # Initialize Pinecone
 pc = Pinecone(api_key=PINECONE_API_KEY)
 
-# Ensure index exists
+# Check if the index exists; if not, create it
 if INDEX_NAME not in pc.list_indexes().names():
     print(f"Creating Pinecone index: {INDEX_NAME}")
     pc.create_index(
@@ -43,72 +33,108 @@ if INDEX_NAME not in pc.list_indexes().names():
         spec=ServerlessSpec(cloud='aws', region='us-east-1'),
     )
 
+# Connect to the index
+index = pc.Index(INDEX_NAME)
 
-def create_embedding_for_new_job(job):
-    """Generate and store embedding for a single job posting."""
-    job_id = str(job['_id'])
-    job_text = f"{job.get('job_title', '')} {' '.join(job.get('skills', []))} {job.get('description', '')} {job.get('location', '')}"
+
+# Fetch only new job descriptions from MongoDB
+def fetch_new_job_descriptions():
+    print("Fetching new job descriptions from MongoDB...")
+    cursor = job_collection.find(
+        {"processed": {"$ne": True}}, 
+        {'_id': 1, 'job_title': 1, 'skills': 1, 'description': 1, 'location': 1}
+    )
+    jobs = [
+        {
+            'id': str(job['_id']),
+            'title': job.get('job_title', ''),
+            'skills': job.get('skills', []),
+            'description': job.get('description', ''),
+            'location': job.get('location', '')
+        }
+        for job in cursor
+    ]
     
-    print(f"Processing job: {job_id}")  
-    
-    # Encode text
-    with torch.no_grad():
-        embedding = model.encode([job_text], batch_size=1, convert_to_tensor=True).cpu().numpy().tolist()[0]
-
-    # Store in Pinecone
-    index = pc.Index(INDEX_NAME)  # Ensure fresh connection
-    metadata = {
-        "job_id": job_id,
-        "title": job.get('job_title', ''),
-        "skills": job.get('skills', []),
-        "description": job.get('description', ''),
-        "location": job.get('location', '')
-    }
-    
-    index.upsert([(job_id, embedding, metadata)])
-    print(f"Stored embedding in Pinecone for job: {job_id}")  
-
-    # Mark as processed in MongoDB
-    job_collection.update_one({"_id": ObjectId(job_id)}, {"$set": {"processed": True}})
-    print(f"Marked job {job_id} as processed in MongoDB")  
+    print(f"Found {len(jobs)} new job descriptions.")
+    return jobs
 
 
-def watch_new_jobs():
-    """Continuously watch MongoDB for new job postings."""
-    print("Watching for new job postings...")
+# Fetch existing job IDs from Pinecone in batches
+def fetch_existing_embeddings(job_ids, batch_size=100):
+    """Check which job IDs already have embeddings in Pinecone in batches."""
+    print("Checking existing embeddings in Pinecone...")
+    existing_ids = set()
 
-    while True:  # Keep running even if an error occurs
-        try:
-            with job_collection.watch() as stream:
-                for change in stream:
-                    if change["operationType"] == "insert":
-                        new_job = change["fullDocument"]
-                        print(f"New job detected: {new_job['_id']}")  
-                        if not new_job.get("processed", False):
-                            create_embedding_for_new_job(new_job)
-        except Exception as e:
-            print(f"Error watching MongoDB: {e}")
-            time.sleep(5)  # Wait before retrying
+    for i in range(0, len(job_ids), batch_size):
+        batch_ids = job_ids[i:i + batch_size]
+        query_results = index.fetch(ids=batch_ids)  # Fetch existing embeddings
 
+        # Extract existing job IDs properly
+        if query_results.vectors:  
+            existing_ids.update(query_results.vectors.keys())
 
-def keep_alive():
-    """Ping the API every 20 minutes to keep Render service alive."""
-    while True:
-        try:
-            response = requests.get(RENDER_API_URL)
-            print(f"Pinged API: {response.status_code}")
-        except Exception as e:
-            print(f"Error pinging API: {e}")
-        time.sleep(600)  # 20 minutes = 1200 seconds
+    print(f"Found {len(existing_ids)} existing embeddings in Pinecone.")
+    return existing_ids
 
 
-@app.get("/start-watching")
-def start_watching(background_tasks: BackgroundTasks):
-    """Start background process to watch for new jobs and keep the service alive."""
-    background_tasks.add_task(watch_new_jobs)
-    background_tasks.add_task(keep_alive)
-    return {"message": "Started watching for new jobs in MongoDB!"}
+# Create embeddings only for new jobs
+def create_new_embeddings(batch_size=32):
+    print("\nStarting embedding creation process...\n")
+    job_descriptions = fetch_new_job_descriptions()
+    if not job_descriptions:
+        print("No new job postings found. Exiting...")
+        return
+
+    job_ids = [job['id'] for job in job_descriptions]
+    existing_ids = fetch_existing_embeddings(job_ids)
+
+    # Filter out jobs that already have embeddings
+    new_jobs = [job for job in job_descriptions if job['id'] not in existing_ids]
+
+    if not new_jobs:
+        print("All jobs already have embeddings. No new embeddings to create.")
+        return
+
+    print(f"Creating embeddings for {len(new_jobs)} new job postings...")
+
+    job_texts, job_ids, metadata_list = [], [], []
+
+    for job in new_jobs:
+        job_text = f"{job['title']} {' '.join(job['skills'])} {job['description']} {job['location']}"
+        metadata = {
+            "job_id": job['id'],
+            "title": job['title'],
+            "skills": job['skills'],
+            "description": job['description'],
+            "location": job['location']
+        }
+        job_ids.append(job['id'])
+        job_texts.append(job_text)
+        metadata_list.append(metadata)
+
+    # Process in batches
+    for i in tqdm(range(0, len(job_texts), batch_size), desc="Creating New Embeddings"):
+        batch_ids = job_ids[i:i + batch_size]
+        batch_texts = job_texts[i:i + batch_size]
+        batch_metadata = metadata_list[i:i + batch_size]
+
+        # Encode the batch
+        with torch.no_grad():
+            embeddings = model.encode(batch_texts, batch_size=batch_size, convert_to_tensor=True).cpu().numpy().tolist()
+
+        # Batch upsert into Pinecone
+        vectors = [(batch_ids[j], embeddings[j], batch_metadata[j]) for j in range(len(batch_ids))]
+        index.upsert(vectors)
+
+    # Convert job IDs back to ObjectId and mark as processed in MongoDB
+    job_collection.update_many(
+        {"_id": {"$in": [ObjectId(job['id']) for job in new_jobs]}}, 
+        {"$set": {"processed": True}}
+    )
+
+    print("Embedding creation complete. Jobs marked as processed in MongoDB.")
 
 
+# Run the script independently
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    create_new_embeddings()
